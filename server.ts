@@ -1258,7 +1258,11 @@ async function executeGenerateContentRoundRobin(contents: any, config: any = {})
     }
   }
 
-  throw new Error("All API Providers failed after multiple attempts. Last error: " + (finalError?.message || "Unknown Error"));
+  let errMsg = finalError?.message || JSON.stringify(finalError) || "Unknown Error";
+  if (typeof errMsg === "string" && (errMsg.includes("PERMISSION_DENIED") || errMsg.includes("403"))) {
+    errMsg = "LỖI API KEY: Mã Gemini API Key của bạn đã bị từ chối truy cập (Lỗi 403). Vui lòng vào mục Cài đặt (Settings) trên AI Studio, mở phần Secrets và cập nhật một GEMINI_API_KEY mới.";
+  }
+  throw new Error(errMsg);
 }
 
 const app = express();
