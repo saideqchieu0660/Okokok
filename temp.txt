@@ -1,0 +1,601 @@
+              typeof savedState.efactor === "number"
+                ? savedState.efactor
+                : card.efactor,
+            isHard:
+              typeof savedState.isWeakCard !== "undefined"
+                ? savedState.isWeakCard
+                : card.isHard,
+          };
+        }
+        return card;
+      });
+    }
+
+    // Attempt to silently update global store locally in background
+    setTimeout(async () => {
+      try {
+        const { store: globalStore } = await import("../lib/store");
+        const currentDecks = [...globalStore.getDecks()];
+        const existIdx = currentDecks.findIndex((d) => d.id === mergedDeck.id);
+        if (existIdx >= 0) {
+          currentDecks[existIdx] = mergedDeck;
+          if (typeof (globalStore as any).setDecksLocally === "function") {
+            (globalStore as any).setDecksLocally(currentDecks);
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }, 0);
+
+    return mergedDeck;
+  }, [rawDeck, personalCardStates]);
+
+  // Load scratchpad from Firestore, fallback to Local Storage
+  useEffect(() => {
+    if (!user || !deckId) return;
+
+    const localKey = `scratchpad_${user.id}_${deckId}`;
+    const localContent = localStorage.getItem(localKey) || "";
+    setScratchpadText(localContent);
+
+    const loadNotes = async () => {
+      try {
+        const docRef = doc(db, "users", user.id, "scratchpads", deckId);
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          const cloudContent = docSnap.data().content || "";
+          setScratchpadText(cloudContent);
+          localStorage.setItem(localKey, cloudContent);
+        }
+      } catch (err: any) {
+        if (!navigator.onLine || err?.message?.includes("offline")) {
+          console.warn("Ghi chú nhanh đang sử dụng bộ nhớ tạm cục bộ (offline).");
+        } else {
+          console.warn("Lỗi khi tải ghi chú nhanh:", err);
+        }
+      }
+    };
+
+    if (navigator.onLine) {
+      loadNotes();
+    }
+  }, [deckId, user?.id]);
+
+  // Debounce Auto-Save scratchpad to Firestore & Local Storage
+  useEffect(() => {
+    if (!user || !deckId) return;
+
+    const localKey = `scratchpad_${user.id}_${deckId}`;
+    const cached = localStorage.getItem(localKey) || "";
+    if (scratchpadText === cached) {
+      return;
+    }
+
+    localStorage.setItem(localKey, scratchpadText);
+
+    const timer = setTimeout(async () => {
+      setIsNotesSaving(true);
+      try {
+        const docRef = doc(db, "users", user.id, "scratchpads", deckId);
+        await setDoc(
+          docRef,
+          {
+            content: scratchpadText,
+            updatedAt: new Date().toISOString(),
+            deckId: deckId,
+            deckTitle: deck?.title || "Sổ tay phòng học",
+          },
+          { merge: true },
+        );
+
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString([], {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        });
+        setLastNotesSavedTime(timeStr);
+      } catch (err: any) {
+        if (!navigator.onLine || err?.message?.includes("offline")) {
+          console.warn("Ghi chú nhanh đã lưu vào bộ nhớ tạm cục bộ (chờ kết nối lại).");
+        } else {
+          console.warn("Lỗi tự động lưu ghi chú:", err);
+        }
+      } finally {
+        setIsNotesSaving(false);
+      }
+    }, 1200);
+
+    return () => clearTimeout(timer);
+  }, [scratchpadText, deckId, user?.id, deck?.title]);
+
+  // Handle network reconnect with throttle
+  useEffect(() => {
+    let reconnectThrottle: NodeJS.Timeout | null = null;
+
+    const handleReconnect = () => {
+      if (reconnectThrottle) return;
+
+      console.log(
+        "[StudyRoom] Network reconnect detected. Ensuring state freshness...",
+      );
+      // onSnapshot automatically refreshes under the hood thanks to enableNetwork.
+      // We can reset isLoading here if the view got stuck
+      if (
+        isLoading &&
+        deckId &&
+        deckId !== "daily-quest" &&
+        deckId !== "remind-later-deck"
+      ) {
+        console.log(
+          "[StudyRoom] Forced loading state bypass to revive stalled UI",
+        );
+        // It might take a moment for onSnapshot to fire, but we mark it as attempting reconnect
+      }
+
+      reconnectThrottle = setTimeout(() => {
+        reconnectThrottle = null;
+      }, 15000); // 15s throttle
+    };
+
+    window.addEventListener("app-network-reconnect", handleReconnect);
+    return () => {
+      window.removeEventListener("app-network-reconnect", handleReconnect);
+      if (reconnectThrottle) clearTimeout(reconnectThrottle);
+    };
+  }, [isLoading, deckId]);
+
+  const [studyQueue, setStudyQueue] = useState<Flashcard[]>([]);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [isFlipped, setIsFlipped] = useState(false);
+  const [isClozeMode, setIsClozeMode] = useState(() => {
+    return localStorage.getItem("study_cloze_mode") === "true";
+  });
+  const [isHintRevealed, setIsHintRevealed] = useState(false);
+  const [finished, setFinished] = useState(false);
+  const [isListModalOpen, setIsListModalOpen] = useState(false);
+  const [listSearchQuery, setListSearchQuery] = useState("");
+  const [isGeneratingCloze, setIsGeneratingCloze] = useState(false);
+
+  useEffect(() => {
+    if (finished) {
+      triggerCelebration();
+      if (deck) {
+        const progressKey = `study_progress_${user?.id || "guest"}_${deck.id}`;
+        localStorage.setItem(progressKey, "0");
+      }
+    }
+  }, [finished, deck, user?.id]);
+  const [sessionCorrectCount, setSessionCorrectCount] = useState(0);
+  const [sessionMasteryGained, setSessionMasteryGained] = useState(0);
+  const [sessionStartTime] = useState(() => Date.now());
+  const [sessionTimeSpent, setSessionTimeSpent] = useState(0);
+  const [sessionHistory, setSessionHistory] = useState<
+    Array<{
+      cardIndex: number;
+      front: string;
+      status: "correct" | "incorrect" | "skipped";
+      cumulativeCorrect: number;
+      cumulativeStudied: number;
+      accuracy: number;
+      masteryChange: number;
+    }>
+  >([]);
+
+  const [isClassModalOpen, setIsClassModalOpen] = useState(false);
+  const [isEditDeckModalOpen, setIsEditDeckModalOpen] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editFront, setEditFront] = useState("");
+  const [editBack, setEditBack] = useState("");
+  const [editExampleSentence, setEditExampleSentence] = useState("");
+  const [isUpdatingCard, setIsUpdatingCard] = useState(false);
+  const [editSuccessMessage, setEditSuccessMessage] = useState<string | null>(
+    null,
+  );
+
+  const [deleteCountdown, setDeleteCountdown] = useState<number | null>(null);
+  const deleteTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const cancelDeleteCountdown = useCallback((e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    if (deleteTimerRef.current) {
+      clearInterval(deleteTimerRef.current);
+      deleteTimerRef.current = null;
+    }
+    setDeleteCountdown(null);
+  }, []);
+
+  useEffect(() => {
+    if (!isEditing) {
+      cancelDeleteCountdown();
+    }
+  }, [isEditing, cancelDeleteCountdown]);
+
+  useEffect(() => {
+    return () => {
+      if (deleteTimerRef.current) {
+        clearInterval(deleteTimerRef.current);
+      }
+    };
+  }, []);
+
+  const [deckEditTitle, setDeckEditTitle] = useState("");
+  const [deckEditSubject, setDeckEditSubject] = useState("");
+  const [isEditingMetadata, setIsEditingMetadata] = useState(false);
+  const [isSavingMetadata, setIsSavingMetadata] = useState(false);
+  const [isCreatingNewSubjectDeck, setIsCreatingNewSubjectDeck] =
+    useState(false);
+
+  const existingSubjects = useMemo(() => {
+    const subjectsSet = new Set<string>();
+    store.getDecks().forEach((d) => {
+      const s =
+        (typeof d.subject === "string"
+          ? d.subject
+          : JSON.stringify(d.subject)) || "general";
+      if (s.trim()) {
+        subjectsSet.add(s.trim());
+      }
+    });
+    // Add default core subjects to make sure they are always available as defaults
+    const defaults = [
+      "general",
+      "english",
+      "math",
+      "science",
+      "history",
+      "geography",
+      "literature",
+      "programming",
+    ];
+    defaults.forEach((def) => subjectsSet.add(def));
+    return Array.from(subjectsSet);
+  }, []);
+
+  const canEditDeck = useMemo(() => {
+    if (!user || !deck) return false;
+    const systemDecks = [
+      "deck_1",
+      "deck_phil_2",
+      "deck_math_1",
+      "deck_math_2",
+      "deck_physics_1",
+      "deck_physics_2",
+                  "deck_test_ui",
+                  "deck_formatting_test",
+      "daily-quest",
+      "remind-later-deck",
+    ];
+    const isSystem = systemDecks.includes(deck.id);
+    const isAdmin =
+      user.role === "admin" || user.role === "Admin" || user.role === "teacher";
+    const isCreator = deck.createdBy === user.id;
+
+    if (isSystem) {
+      return isAdmin; // Only admin/teacher can edit system/official decks
+    }
+    return isCreator || isAdmin;
+  }, [user, deck]);
+
+  useEffect(() => {
+    if (deck && !isEditingMetadata) {
+      setDeckEditTitle(
+        typeof deck.title === "string"
+          ? deck.title
+          : JSON.stringify(deck.title),
+      );
+      setDeckEditSubject(
+        typeof deck.subject === "string"
+          ? deck.subject
+          : deck.subject
+            ? JSON.stringify(deck.subject)
+            : "general",
+      );
+    }
+  }, [deck, isEditingMetadata]);
+
+  const handleUpdateDeckMetadata = async () => {
+    if (!deck || !deckEditTitle.trim() || !canEditDeck) return;
+    setIsSavingMetadata(true);
+    try {
+      const { db } = await import("../lib/firebase");
+      const { doc, updateDoc } = await import("firebase/firestore");
+
+      const docRef = doc(db, "sets", deck.id);
+      await updateDoc(docRef, {
+        title: deckEditTitle.trim(),
+        subject: deckEditSubject.trim() || "general",
+      });
+
+      // Update locally
+      const currentDecks = store.getDecks();
+      const existIdx = currentDecks.findIndex((d) => d.id === deck.id);
+      if (existIdx >= 0) {
+        currentDecks[existIdx].title = deckEditTitle.trim();
+        currentDecks[existIdx].subject = deckEditSubject.trim() || "general";
+        if (typeof (store as any).setDecksLocally === "function") {
+          (store as any).setDecksLocally(currentDecks);
+        }
+      }
+
+      setEditSuccessMessage("Đã cập nhật thông tin bộ bài thành công!");
+      setTimeout(() => setEditSuccessMessage(null), 3000);
+      setIsEditingMetadata(false);
+    } catch (err) {
+      const { handleFirestoreError, OperationType } =
+        await import("../lib/firebase");
+      handleFirestoreError(err, OperationType.UPDATE, `sets/${deck.id}`);
+    } finally {
+      setIsSavingMetadata(false);
+    }
+  };
+
+  const handleToggleMute = () => {
+    toggleSound();
+  };
+
+  const handleExportDeck = () => {
+    if (!deck) return;
+    const cleanDeck = {
+      title: deck.title,
+      subject: deck.subject,
+      cards: deck.cards.map((card) => ({
+        front: card.front || "",
+        back: card.back || "",
+      })),
+    };
+    const blob = new Blob([JSON.stringify(cleanDeck, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${deck.title.replace(/\s+/g, "_").toLowerCase()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  useEffect(() => {
+    if (deck && isOfflineSaved) {
+      saveDeckOffline(deck).catch((e) =>
+        console.error("Error backing up updated deck to offline DB:", e),
+      );
+    }
+  }, [deck, isOfflineSaved]);
+
+  const handleToggleOffline = async () => {
+    if (!deck) return;
+    try {
+      if (isOfflineSaved) {
+        await deleteOfflineDeck(deck.id);
+        setIsOfflineSaved(false);
+      } else {
+        await saveDeckOffline(deck);
+        setIsOfflineSaved(true);
+      }
+    } catch (e) {
+      console.error("Error toggling offline storage:", e);
+    }
+  };
+
+  const handleFlip = () => {
+    if (!isEditing) {
+      if (!isFlipped)
+        playFlipSound(); // Optionally play sound both on flip and unflip, but just play it
+      else playFlipSound();
+      setIsFlipped(!isFlipped);
+    }
+  };
+
+  const [deepExplanation, setDeepExplanation] = useState<string | null>(null);
+  const [isCopiedExplanation, setIsCopiedExplanation] = useState(false);
+  const [isApplyExplanationModalOpen, setIsApplyExplanationModalOpen] = useState(false);
+  const [isApplyingExplanation, setIsApplyingExplanation] = useState(false);
+  const [isSerif, setIsSerif] = useState(true);
+  const [isPinned, setIsPinned] = useState(false);
+  const [isMinimized, setIsMinimized] = useState(false);
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [activeAgent, setActiveAgent] = useState<2 | 3>(2);
+  const [quote] = useState(
+    MOTIVATION_QUOTES[Math.floor(Math.random() * MOTIVATION_QUOTES.length)],
+  );
+
+  const [studyMode, setStudyMode] = useState<"all" | "weak">("all");
+  const [weakCardIds, setWeakCardIds] = useState<string[]>([]);
+  const [showRemindToast, setShowRemindToast] = useState(false);
+
+  // Pomodoro
+  const POMODORO_MINS = 25;
+  const [timerSeconds, setTimerSeconds] = useState(POMODORO_MINS * 60);
+  const [isTimerRunning, setIsTimerRunning] = useState(false);
+  const [isTimerFinished, setIsTimerFinished] = useState(false);
+
+  useEffect(() => {
+    let interval: any;
+    if (isTimerRunning && timerSeconds > 0) {
+      interval = setInterval(() => {
+        setTimerSeconds((s) => s - 1);
+      }, 1000);
+    } else if (isTimerRunning && timerSeconds === 0) {
+      setIsTimerRunning(false);
+      setIsTimerFinished(true);
+      store.addBonusPoints(25);
+    }
+    return () => clearInterval(interval);
+  }, [isTimerRunning, timerSeconds]);
+
+  const toggleTimer = () => {
+    if (isTimerFinished) {
+      setTimerSeconds(POMODORO_MINS * 60);
+      setIsTimerFinished(false);
+      setIsTimerRunning(true);
+    } else {
+      setIsTimerRunning(!isTimerRunning);
+    }
+  };
+
+  const formatTime = (totalSeconds: number) => {
+    const m = Math.floor(totalSeconds / 60);
+    const s = totalSeconds % 60;
+    return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+  };
+
+  // Đồng bộ thời gian thực Thẻ X (weak cards) giữa Firestore sync deck và localStorage kéo theo đa thiết bị
+  useEffect(() => {
+    if (!deck || !deck.cards) return;
+
+    const storageKey = `weak_cards_${deck.id}`;
+    const savedWeakIds: string[] = JSON.parse(
+      localStorage.getItem(storageKey) || "[]",
+    );
+
+    const finalWeakIdsSet = new Set<string>();
+
+    // 1. Quét tất cả thẻ được đánh dấu là isHard: true từ Firestore / store memory
+    deck.cards.forEach((c: any) => {
+      if (c.isHard) {
+        finalWeakIdsSet.add(c.id);
+      }
+    });
+
+    // 2. Bảo lưu các thẻ X trong localStorage nếu thẻ đó vẫn tồn tại trong bộ này
+    // và chưa bị đánh dấu rõ ràng là isHard = false ở trên Firestore (khớp trạng thái)
+    const cardsInDeck = new Set(deck.cards.map((c: any) => c.id));
+    savedWeakIds.forEach((id) => {
+      if (cardsInDeck.has(id)) {
+        const cardObj = deck.cards.find((c: any) => c.id === id);
+        if (cardObj && cardObj.isHard !== false) {
+          finalWeakIdsSet.add(id);
+        }
+      }
+    });
+
+    const finalWeakIds = Array.from(finalWeakIdsSet);
+
+    // Tránh render lặp vô tận bằng cách so sánh sâu mảng
+    const hasDiff =
+      finalWeakIds.length !== savedWeakIds.length ||
+      !finalWeakIds.every((id) => savedWeakIds.includes(id)) ||
+      finalWeakIds.length !== weakCardIds.length ||
+      !finalWeakIds.every((id) => weakCardIds.includes(id));
+
+    if (hasDiff) {
+      try {
+        localStorage.setItem(storageKey, JSON.stringify(finalWeakIds));
+      } catch (e) {
+        console.warn("Storage Quota Exceeded", e);
+      }
+      setWeakCardIds(finalWeakIds);
+    }
+  }, [deck, weakCardIds]);
+
+  const queueInitDeckIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (deck) {
+      if (queueInitDeckIdRef.current === deck.id) return; // Prevent overwriting study state on background syncs
+      queueInitDeckIdRef.current = deck.id;
+
+      const storageKey = `weak_cards_${deck.id}`;
+      const savedWeakIds = JSON.parse(localStorage.getItem(storageKey) || "[]");
+      setWeakCardIds(savedWeakIds);
+
+      let due = deck.cards || [];
+      if (deck.id === "daily-quest") {
+        const now = Date.now();
+        // Filter cards based on mastery and next review time
+        const reviewCards = due.filter(
+          (c: any) => c.mastery > 0 && c.nextReview <= now,
+        );
+        const newCards = due.filter(
+          (c: any) => !c.mastery || c.mastery === 0 || !c.nextReview,
+        );
+
+        // Mix 80% review (up to 16 cards) and 20% new (up to 4 cards) = max 20 cards standard
+        const shuffledReview = reviewCards
+          .sort(() => Math.random() - 0.5)
+          .slice(0, 16);
+        const shuffledNew = newCards
+          .sort(() => Math.random() - 0.5)
+          .slice(0, 4);
+
+        due = [...shuffledReview, ...shuffledNew].sort(
+          () => Math.random() - 0.5,
+        );
+
+        // If no due cards, we can just grab some new or random cards to keep the daily quest active
+        if (due.length === 0) {
+          due = newCards.sort(() => Math.random() - 0.5).slice(0, 10);
+        }
+      }
+      setStudyQueue(due);
+
+      // Restore study progress
+      const progressKey = `study_progress_${user?.id || "guest"}_${deck.id}`;
+      const savedIdxStr = localStorage.getItem(progressKey);
+      let loadedIdx = 0;
+      if (savedIdxStr) {
+        const parsed = parseInt(savedIdxStr, 10);
+        if (!isNaN(parsed) && parsed > 0 && parsed < due.length) {
+          loadedIdx = parsed;
+        }
+      }
+      setCurrentIndex(loadedIdx);
+      setIsFlipped(false);
+      setSessionCorrectCount(0);
+      setSessionMasteryGained(0);
+      setSessionTimeSpent(0);
+      setSessionHistory([]);
+    }
+  }, [deck, user]);
+
+  useEffect(() => {
+    if (deck && currentIndex !== undefined && currentIndex >= 0) {
+      const progressKey = `study_progress_${user?.id || "guest"}_${deck.id}`;
+      try {
+        localStorage.setItem(progressKey, currentIndex.toString());
+      } catch (e) {
+        console.warn("Storage Quota Exceeded", e);
+      }
+    }
+  }, [currentIndex, deck, user?.id]);
+
+  useEffect(() => {
+    setIsHintRevealed(false);
+  }, [currentIndex]);
+
+  useEffect(() => {
+    const unlockAudio = () => {
+      initAudio();
+      window.removeEventListener("click", unlockAudio);
+      window.removeEventListener("touchstart", unlockAudio);
+    };
+    window.addEventListener("click", unlockAudio);
+    window.addEventListener("touchstart", unlockAudio);
+    return () => {
+      window.removeEventListener("click", unlockAudio);
+      window.removeEventListener("touchstart", unlockAudio);
+    };
+  }, []);
+
+  const startReviewXCards = () => {
+    if (!deck) return;
+    const storageKey = `weak_cards_${deck.id}`;
+    const savedWeakIds = JSON.parse(localStorage.getItem(storageKey) || "[]");
+    const weakCards = (deck.cards || []).filter((c: any) =>
+      savedWeakIds.includes(c.id),
+    );
+
+    if (weakCards.length === 0) {
+      toast("Tuyệt vời! Bạn không còn thẻ nào bị đánh dấu X trong bộ này.");
+      return;
+    }
+
+    setWeakCardIds(savedWeakIds);
+    setStudyQueue(weakCards);
+    setStudyMode("weak");
+    setCurrentIndex(0);
+    setSessionCorrectCount(0);
+    setSessionMasteryGained(0);
+    setSessionHistory([]);

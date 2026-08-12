@@ -1,0 +1,301 @@
+  // Removed unused state
+  const [muteAll, setMuteAll] = useState(() => getIsMuted());
+  const [currentMonth, setCurrentMonth] = useState(() => new Date());
+  const [notificationsEnabled, setNotificationsEnabled] = useState(() => {
+    if (typeof window !== "undefined") {
+      const saved = localStorage.getItem("henosis_notifications");
+      return saved === "true";
+    }
+    return false;
+  });
+  const [isChartExpanded, setIsChartExpanded] = useState(false);
+  const [chartPeriod, setChartPeriod] = useState<
+    "7_days" | "30_days" | "all_time"
+  >("7_days");
+  const [isWeeklyStudyModalOpen, setIsWeeklyStudyModalOpen] = useState(false);
+  const [isDetailedStatsModalOpen, setIsDetailedStatsModalOpen] =
+    useState(false);
+  const [showEnvDebug, setShowEnvDebug] = useState(false);
+  const [localFontSize, setLocalFontSize] = useState<number>(() => {
+    const saved = localStorage.getItem("henosis-font-size");
+    return saved ? parseInt(saved, 10) : 16;
+  });
+
+  const [localUiDensity, setLocalUiDensity] = useState<
+    "comfortable" | "compact"
+  >(() => {
+    const saved = localStorage.getItem("henosis-ui-density");
+    return saved === "compact" || saved === "comfortable"
+      ? saved
+      : "comfortable";
+  });
+
+  useEffect(() => {
+    const handleCustomChange = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (customEvent.detail && typeof customEvent.detail.size === "number") {
+        setLocalFontSize(customEvent.detail.size);
+      }
+    };
+    const handleDensityChange = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (
+        customEvent.detail &&
+        (customEvent.detail.density === "comfortable" ||
+          customEvent.detail.density === "compact")
+      ) {
+        setLocalUiDensity(customEvent.detail.density);
+      }
+    };
+    window.addEventListener(
+      "henosis-font-size-changed",
+      handleCustomChange as EventListener,
+    );
+    window.addEventListener(
+      "henosis-ui-density-changed",
+      handleDensityChange as EventListener,
+    );
+    return () => {
+      window.removeEventListener(
+        "henosis-font-size-changed",
+        handleCustomChange as EventListener,
+      );
+      window.removeEventListener(
+        "henosis-ui-density-changed",
+        handleDensityChange as EventListener,
+      );
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleNotifChange = (e: Event) => {
+      const customEvent = e as CustomEvent;
+      if (
+        customEvent.detail &&
+        typeof customEvent.detail.enabled === "boolean"
+      ) {
+        setNotificationsEnabled(customEvent.detail.enabled);
+      } else {
+        const saved = localStorage.getItem("henosis_notifications") === "true";
+        setNotificationsEnabled(saved);
+      }
+    };
+    window.addEventListener("henosis_notifications_changed", handleNotifChange);
+    return () => {
+      window.removeEventListener(
+        "henosis_notifications_changed",
+        handleNotifChange,
+      );
+    };
+  }, []);
+
+  const [rawDecks, setRawDecks] = useState<Deck[]>(() => store.getDecks());
+  const [personalCardStates, setPersonalCardStates] = useState<any[]>([]);
+  const [broadcasts, setBroadcasts] = useState<any[]>([]);
+
+  useEffect(() => {
+
+    const q = query(
+      collection(db, "global_activity_feed"),
+      orderBy("timestamp", "desc"),
+      limit(20),
+    );
+
+    const unsubscribe = onSnapshot(
+      q,
+      (snapshot) => {
+        const activeBroadcasts: any[] = [];
+        const fortyEightHoursAgo = Date.now() - 48 * 60 * 60 * 1000;
+
+        snapshot.forEach((snapshotDoc) => {
+          const data = snapshotDoc.data();
+          if (
+            data.isGlobalBroadcast === true &&
+            data.timestamp &&
+            data.timestamp >= fortyEightHoursAgo
+          ) {
+            activeBroadcasts.push({
+              id: snapshotDoc.id,
+              userId: data.userId || "",
+              userName: data.userName || "Anonymous",
+              content: data.content || "",
+              timestamp:
+                typeof data.timestamp === "number"
+                  ? data.timestamp
+                  : data.timestamp?.toMillis
+                    ? data.timestamp.toMillis()
+                    : Date.now(),
+              userRole: data.userRole || "student",
+            });
+          }
+        });
+        setBroadcasts(activeBroadcasts);
+      },
+      (err) => {
+        console.warn("Could not load broadcasts on homepage:", err);
+        try {
+          const localFeedStr =
+            localStorage.getItem("local_global_activity_feed") || "[]";
+          const localFeed = JSON.parse(localFeedStr);
+          const fortyEightHoursAgo = Date.now() - 48 * 60 * 60 * 1000;
+          const active = localFeed.filter(
+            (item: any) =>
+              item.isGlobalBroadcast && item.timestamp >= fortyEightHoursAgo,
+          );
+          setBroadcasts(active);
+        } catch (e) {}
+      },
+    );
+
+    return () => unsubscribe();
+  }, []);
+  const [joinStatus, setJoinStatus] = useState<string | null>(null);
+  const [newGroupName, setNewGroupName] = useState("");
+  const [createdGroupId, setCreatedGroupId] = useState<string | null>(null);
+  const [isCreating, setIsCreating] = useState(false);
+
+  // Manual creation states & logic
+  const [manualTitle, setManualTitle] = useState("");
+  const [manualSubject, setManualSubject] = useState("");
+  const [isCreatingNewSubject, setIsCreatingNewSubject] = useState(false);
+  const [manualCards, setManualCards] = useState<
+    { front: string; back: string }[]
+  >([]);
+
+  const existingSubjects = useMemo(() => {
+    const subjectsSet = new Set<string>();
+    rawDecks.forEach((d) => {
+      const s =
+        (typeof d.subject === "string"
+          ? d.subject
+          : JSON.stringify(d.subject)) || "Tự chọn";
+      if (s.trim()) {
+        subjectsSet.add(s.trim());
+      }
+    });
+    // Add default core subjects in Vietnamese
+    const defaults = [
+      "Tiếng Anh",
+      "Toán học",
+      "Vật lý",
+      "Hóa học",
+      "Sinh học",
+      "Lịch sử",
+      "Địa lý",
+      "Triết học",
+      "Tin học / Lập trình",
+      "Tự chọn",
+    ];
+    defaults.forEach((def) => subjectsSet.add(def));
+    return Array.from(subjectsSet);
+  }, [rawDecks]);
+  const [currentFront, setCurrentFront] = useState("");
+  const [currentBack, setCurrentBack] = useState("");
+  const [creationMethod, setCreationMethod] = useState<"ai" | "manual">("ai");
+
+  const handleAddManualCard = () => {
+    if (!currentFront.trim() || !currentBack.trim()) return;
+    setManualCards([
+      ...manualCards,
+      { front: currentFront.trim(), back: currentBack.trim() },
+    ]);
+    setCurrentFront("");
+    setCurrentBack("");
+  };
+
+  const handleRemoveManualCard = (index: number) => {
+    setManualCards(manualCards.filter((_, idx) => idx !== index));
+  };
+
+  const handleSaveManualDeck = async () => {
+    if (!manualTitle.trim()) {
+      toast("Vui lòng nhập tiêu đề bộ thẻ!");
+      return;
+    }
+    if (manualCards.length === 0) {
+      toast("Bộ thẻ cần có ít nhất 1 thẻ!");
+      return;
+    }
+    const deckId = `deck_user_${Date.now()}`;
+    const newDeck: Deck = {
+      id: deckId,
+      title: manualTitle.trim(),
+      subject: manualSubject.trim() || "Tự chọn",
+      cards: manualCards.map((c, idx) => ({
+        id: `card_user_${Date.now()}_${idx}`,
+        front: c.front,
+        back: c.back,
+        subject: manualSubject.trim() || "Tự chọn",
+        mastery: 0,
+        nextReview: Date.now(),
+        isHard: false,
+      })),
+    };
+
+    await store.addDeck(newDeck);
+
+    setManualTitle("");
+    setManualSubject("");
+    setIsCreatingNewSubject(false);
+    setManualCards([]);
+    toast(
+      `Chúc mừng! Bộ thẻ "${newDeck.title}" đã được tạo thành công! Bạn có thể xem ngay tại tab "Bộ Học".`,
+    );
+    setActiveTab("all_sets");
+  };
+
+  const navigate = useNavigate();
+  const unsubDecksRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (!user) return;
+    if (unsubDecksRef.current) unsubDecksRef.current();
+
+    try {
+      const q = query(collection(db, "decks"), where("ownerId", "==", user.id));
+      const unsub = onSnapshot(
+        q,
+        (snapshot) => {
+          const list = [];
+          snapshot.forEach((docSnap) => {
+            list.push({ id: docSnap.id, ...docSnap.data() });
+          });
+          setRawDecks(list);
+        },
+        (err) => {
+          console.warn("Decks sync error, fallback to memory:", err);
+        }
+      );
+      unsubDecksRef.current = unsub;
+      FirebaseListenerManager.add("StudentDashboard_decks", unsub);
+    } catch (e) {
+      console.error("Failed to sync sets in real-time:", e);
+    }
+
+    return () => {
+      if (unsubDecksRef.current) {
+        unsubDecksRef.current();
+        unsubDecksRef.current = null;
+      }
+      FirebaseListenerManager.remove("StudentDashboard_decks");
+    };
+  }, [user?.id]);
+
+  // 2. Listen to personal card states in real-time
+  const unsubCardStatesRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (!user) return;
+    if (unsubCardStatesRef.current) unsubCardStatesRef.current();
+    try {
+      const unsub = onSnapshot(
+        collection(db, "users", user.id, "cardsState"),
+        (snapshot) => {
+          const states: any[] = [];
+          snapshot.forEach((docSnap) => {
+            states.push({ id: docSnap.id, ...docSnap.data() });
+          });
+          setPersonalCardStates(states);
+        },
+        (err) => {
+          console.warn("Personal cardsState sync error, fallback to memory:", err);
+        },
+      );
