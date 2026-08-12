@@ -39,7 +39,10 @@ export function GlobalErrorReporter() {
         reasonMsg.includes("dynamically imported module") || 
         reasonMsg.includes("Loading chunk failed") ||
         reasonMsg.includes("WebSocket closed without opened") ||
-        reasonMsg.includes("WebSocket is not open")
+        reasonMsg.includes("WebSocket is not open") ||
+        reasonMsg.includes("Database is closing") ||
+        reasonMsg.includes("Database is closed") ||
+        reasonMsg.includes("hidden")
       ) return;
 
       setErrorLog({
