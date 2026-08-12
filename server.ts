@@ -195,25 +195,22 @@ const geminiKeyStates: KeyState[] = GEMINI_KEYS.map((key, i) => ({
 
 let currentKeyIndex = Math.floor(Math.random() * Math.max(1, geminiKeyStates.length));
 
-// Dynamic Groq/Cerebras API Key Coordinator and Status Tracker
+// Dynamic Cerebras API Key Coordinator and Status Tracker (reusing groq vars to avoid breaking changes)
 const GROQ_KEYS = Object.keys(process.env)
-  .filter(key => key.startsWith('GROQ_API_KEY_') || key.startsWith('VITE_CEREBRAS_KEY_'))
+  .filter(key => key.startsWith('VITE_CEREBRAS_KEY_') || key.startsWith('CEREBRAS_API_KEY_'))
   .sort((a, b) => {
-    const numA = parseInt(a.replace(/^(GROQ_API_KEY_|VITE_CEREBRAS_KEY_)/, '')) || 0;
-    const numB = parseInt(b.replace(/^(GROQ_API_KEY_|VITE_CEREBRAS_KEY_)/, '')) || 0;
+    const numA = parseInt(a.replace(/^(VITE_CEREBRAS_KEY_|CEREBRAS_API_KEY_)/, '')) || 0;
+    const numB = parseInt(b.replace(/^(VITE_CEREBRAS_KEY_|CEREBRAS_API_KEY_)/, '')) || 0;
     return numA - numB;
   })
   .map(key => process.env[key])
   .filter(Boolean) as string[];
 
-if (GROQ_KEYS.length === 0 && process.env.GROQ_API_KEY) {
-  GROQ_KEYS.push(process.env.GROQ_API_KEY);
-}
-if (GROQ_KEYS.length === 0 && process.env.VITE_GROQ_API_KEY) {
-  GROQ_KEYS.push(process.env.VITE_GROQ_API_KEY);
-}
 if (GROQ_KEYS.length === 0 && process.env.VITE_CEREBRAS_KEY) {
   GROQ_KEYS.push(process.env.VITE_CEREBRAS_KEY);
+}
+if (GROQ_KEYS.length === 0 && process.env.CEREBRAS_API_KEY) {
+  GROQ_KEYS.push(process.env.CEREBRAS_API_KEY);
 }
 
 // Fallback to beautiful default simulated pool if environment is completely empty
@@ -944,13 +941,11 @@ function addGroqRotationLog(log: Partial<RotationLog>) {
 
 function getGroqKey(): { key: string; state: KeyState } {
   if (groqKeyStates.length === 0) {
-    console.warn("⚠️ AUTO-RELOAD GUARD (Runtime): Groq queue is empty, attempting to recover...");
+    console.warn("⚠️ AUTO-RELOAD GUARD (Runtime): Cerebras queue is empty, attempting to recover...");
     const envKeys = [
-      process.env.GROQ_API_KEY, process.env.VITE_GROQ_API_KEY,
-      process.env.GROQ_API_KEY_1, process.env.GROQ_API_KEY_2, process.env.GROQ_API_KEY_3,
-      process.env.GROQ_API_KEY_4, process.env.GROQ_API_KEY_5, process.env.GROQ_API_KEY_6,
       process.env.VITE_CEREBRAS_KEY, process.env.VITE_CEREBRAS_KEY_1, process.env.VITE_CEREBRAS_KEY_2,
-      process.env.VITE_CEREBRAS_KEY_3, process.env.VITE_CEREBRAS_KEY_4, process.env.VITE_CEREBRAS_KEY_5
+      process.env.VITE_CEREBRAS_KEY_3, process.env.VITE_CEREBRAS_KEY_4, process.env.VITE_CEREBRAS_KEY_5,
+      process.env.CEREBRAS_API_KEY, process.env.CEREBRAS_API_KEY_1, process.env.CEREBRAS_API_KEY_2
     ].filter(k => k && k.trim() && k !== "undefined" && k !== "null").map(k => k!.trim());
     
     const uniqueKeys = [...new Set(envKeys)];
@@ -1133,10 +1128,11 @@ async function executeGenerateContentRoundRobin(contents: any, config: any = {})
   }
   
   let activeProviders: string[] = [];
-  if (geminiKeyStates.length > 0 || process.env.GEMINI_API_KEY) activeProviders.push("gemini");
-  if (groqKeyStates.length > 0) activeProviders.push("groq");
-  if (openRouterKeyStates.length > 0) activeProviders.push("openrouter");
-
+  // MUTE GEMINI TEMPORARILY:
+  // if (geminiKeyStates.length > 0 || process.env.GEMINI_API_KEY) activeProviders.push("gemini");
+  
+  if (groqKeyStates.length > 0 || process.env.VITE_CEREBRAS_KEY || process.env.CEREBRAS_API_KEY) activeProviders.push("groq");
+  
   if (activeProviders.length === 0) {
     throw new Error("Tất cả Cổng API đều đã tắt hoặc hết key. Vui lòng bật ít nhất 1 nhà cung cấp.");
   }
@@ -1172,13 +1168,8 @@ async function executeGenerateContentRoundRobin(contents: any, config: any = {})
           try {
             const { key, state } = getGroqKey();
             currentGroqState = state;
-            const isCerebras = key.startsWith("csk-") || key.startsWith("csk_") || !key.startsWith("gsk_");
-            const endpoint = isCerebras 
-              ? "https://api.cerebras.ai/v1/chat/completions" 
-              : "https://api.groq.com/openai/v1/chat/completions";
-            const modelName = isCerebras 
-              ? await getCerebrasModel() 
-              : "llama-3.3-70b-versatile";
+            const endpoint = "https://api.cerebras.ai/v1/chat/completions";
+            const modelName = await getCerebrasModel();
 
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 30000);
@@ -1205,7 +1196,7 @@ async function executeGenerateContentRoundRobin(contents: any, config: any = {})
 
             if (!res.ok) {
               const errBody = await res.text().catch(() => "");
-              throw new Error(`Groq/Cerebras API Error ${res.status}: ${errBody}`);
+              throw new Error(`Cerebras API Error ${res.status}: ${errBody}`);
             }
 
             const data = await res.json();
@@ -1221,38 +1212,6 @@ async function executeGenerateContentRoundRobin(contents: any, config: any = {})
         }
       }
 
-      if (provider === "openrouter") {
-        try {
-          const { key, state } = getOpenRouterKey();
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 30000);
-          const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": `Bearer ${key}`
-            },
-            body: JSON.stringify({
-              model: "meta-llama/llama-3.3-70b-instruct",
-              messages: [
-                 ...(config.systemInstruction ? [{ role: "system", content: config.systemInstruction }] : []),
-                 { role: "user", content: promptText }
-              ],
-              temperature: config.temperature ?? 0.3,
-              ...(isJsonMode ? { response_format: { type: "json_object" } } : {})
-            }),
-            signal: controller.signal
-          });
-          clearTimeout(timeoutId);
-          if (res.ok) {
-            const data = await res.json();
-            const text = data?.choices?.[0]?.message?.content || "";
-            if (text) return text;
-          }
-        } catch (err: any) {
-          finalError = err;
-        }
-      }
     } catch (e: any) {
       console.warn(`[${provider}] Unhandled error:`, e?.message);
     }
