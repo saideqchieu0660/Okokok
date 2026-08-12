@@ -1376,7 +1376,13 @@ export default function LegacyStudyRoom() {
       });
 
       if (!res.ok) throw new Error("API Exception");
-      const data = await res.json();
+      let data;
+        try {
+          const text = await res.text();
+          data = JSON.parse(text);
+        } catch (e) {
+          data = { result: "Server Error: " + (e.message || "Invalid JSON") };
+        }
 
       if (data.example) {
         const targetDeckId = currentCard.originDeckId || deck?.id;
@@ -1787,7 +1793,13 @@ export default function LegacyStudyRoom() {
       });
 
       if (!res.ok) {
-        const errData = await res.json();
+        let errData;
+        try {
+          const text = await res.text();
+          errData = JSON.parse(text);
+        } catch (e) {
+          errData = { error: "Server Error: " + (e.message || "Invalid JSON") };
+        }
         if (res.status === 429) {
           setDeepExplanation(
             `⏳ **Cooldown 20s**: ${errData.error || "Bạn đang gọi AI quá nhanh. Hãy chờ!"}`,
@@ -1798,7 +1810,13 @@ export default function LegacyStudyRoom() {
         throw new Error(errData.error || "Failed to query express backend");
       }
 
-      const data = await res.json();
+      let data;
+        try {
+          const text = await res.text();
+          data = JSON.parse(text);
+        } catch (e) {
+          data = { result: "Server Error: " + (e.message || "Invalid JSON") };
+        }
       setDeepExplanation(data.result);
     } catch (e: any) {
       setDeepExplanation(
@@ -1833,7 +1851,13 @@ export default function LegacyStudyRoom() {
         }),
       });
 
-      const data = await res.json();
+      let data;
+        try {
+          const text = await res.text();
+          data = JSON.parse(text);
+        } catch (e) {
+          data = { result: "Server Error: " + (e.message || "Invalid JSON") };
+        }
       let parsed: { cardType?: string; suggestedPrompt?: string } = {};
       if (data && data.result) {
         try {
@@ -1964,7 +1988,13 @@ export default function LegacyStudyRoom() {
       });
 
       if (!res.ok) {
-        const errData = await res.json();
+        let errData;
+        try {
+          const text = await res.text();
+          errData = JSON.parse(text);
+        } catch (e) {
+          errData = { error: "Server Error: " + (e.message || "Invalid JSON") };
+        }
         if (res.status === 429) {
           setDeepExplanation(
             `⏳ **Cooldown 20s**: ${errData.error || "Bạn đang gọi AI quá nhanh. Hãy chờ!"}`,
@@ -1975,7 +2005,13 @@ export default function LegacyStudyRoom() {
         throw new Error(errData.error || "Failed to query express backend");
       }
 
-      const data = await res.json();
+      let data;
+        try {
+          const text = await res.text();
+          data = JSON.parse(text);
+        } catch (e) {
+          data = { result: "Server Error: " + (e.message || "Invalid JSON") };
+        }
       setDeepExplanation(data.result);
     } catch (e: any) {
       setDeepExplanation(

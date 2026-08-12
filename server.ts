@@ -1079,7 +1079,7 @@ const providerThrottleStates: Record<string, number> = {
   openrouter: 0
 };
 
-let cachedCerebrasModel = "gpt-oss-120b";
+let cachedCerebrasModel = "llama-3.3-70b";
 let hasVerifiedCerebrasModel = false;
 
 async function getCerebrasModel(): Promise<string> {
@@ -1172,7 +1172,7 @@ async function executeGenerateContentRoundRobin(contents: any, config: any = {})
             const modelName = await getCerebrasModel();
 
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 30000);
+            const timeoutId = setTimeout(() => controller.abort(), 9000);
 
             const res = await fetch(endpoint, {
               method: "POST",
@@ -2610,9 +2610,9 @@ ${reminderSuffix}`;
       const isYellow = msg.includes("429") || msg.includes("503") || msg.includes("quota") || msg.toLowerCase().includes("too many requests");
       
       if (isYellow) {
-        await db.collection("vibe_api_keys_pool").doc(selectedKey.id).update({ status: "YELLOW", recoveryTime: Date.now() + 30000 });
+        await db.collection("vibe_api_keys_pool").doc(selectedKey.id).update({ status: "YELLOW", recoveryTime: Date.now() + 9000 });
         console.warn(`Vibe Rotator: Key ${selectedKey.id} hit YELLOW. Global pause for 30s...`);
-        if (!type) await delay(30000); // Do not delay in test mode
+        if (!type) await delay(9000); // Do not delay in test mode
         return executeVibeRequest(prompt, type); // Recursive retry
       } else if (isRed) {
         await db.collection("vibe_api_keys_pool").doc(selectedKey.id).update({ status: "RED" });
